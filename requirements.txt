@@ -18,3 +18,11 @@ matplotlib>=3.8.0
 #
 # If pip ompl is unavailable for your Python/OS combo, install OMPL separately
 # from system packages/source and ensure the Python bindings are importable.
+
+# IK via Pinocchio (replaces custom DLS IK in src/executor.py).
+# Install with:
+#   pip install pin robot_descriptions
+# Verify with:
+#   python -c "import pinocchio; from robot_descriptions.loaders.pinocchio import load_robot_description; r = load_robot_description('panda_description'); print('pinocchio ok')"
+pin>=2.6.0
+robot_descriptions>=1.0.0
