@@ -1,261 +1,296 @@
-# CTAMP Robot Arm Log Analysis
+# Laporan MVP CTAMP Robot V1
 
-Dokumen ini merangkum analisis run OMPL + MuJoCo terbaru untuk task `align_cubes` dan `separate_groups`.
+CTAMP Robot V1 adalah MVP simulasi robot arm untuk studi **Continuous Task and
+Motion Planning (CTAMP)**. Aplikasi ini menggabungkan task planning,
+motion planning, inverse kinematics, simulasi fisika MuJoCo, dan validasi
+collision untuk menjalankan task pick-and-place pada robot Franka Panda.
 
-Analisis dibuat dari event CSV di `logs/` menggunakan `pandas` + `matplotlib` melalui:
+Fokus MVP ini bukan hanya membuat robot bergerak, tetapi membuktikan pipeline:
+
+1. Membaca scene robot, object, obstacle, dan goal area.
+2. Menentukan urutan task seperti pick, place, align, tidy up, atau separate.
+3. Mengubah target task menjadi pose/joint target robot.
+4. Mencari motion path dengan OMPL.
+5. Mengeksekusi trajectory di MuJoCo dengan collision checking.
+6. Merekam event log agar kegagalan bisa dianalisis dan diperbaiki.
+
+## Apa Yang Bisa Dilakukan
+
+Aplikasi ini dapat digunakan untuk:
+
+- Menjalankan simulasi robot Franka Panda di MuJoCo.
+- Melakukan pick-and-place object movable pada scene meja.
+- Menjalankan task `tidy_up`, `align_cubes`, dan `separate_groups`.
+- Menghindari obstacle fragile seperti vase, glass, ceramic, dan obstacle lain.
+- Memakai OMPL untuk planning trajectory joint-space yang collision-aware.
+- Memakai Pinocchio IK sebagai solver utama, dengan fallback legacy DLS bila
+  dikonfigurasi.
+- Menjalankan mode scripted OMPL-only tanpa LLM untuk eksperimen yang lebih
+  deterministic.
+- Menjalankan mode LLM planner melalui `src/main.py` untuk goal berbasis teks.
+- Membuat CSV event log dan laporan analisis dari hasil run.
+- Membandingkan performa sebelum dan sesudah improvement.
+
+## Struktur Project
+
+```text
+MVP-CTAMP-ROBOT/
+  assets/                         asset pendukung
+  docs/                           laporan, audit, dan output analisis
+  models/                         MuJoCo XML scene dan robot model
+  scripts/                        task runner dan tool analisis
+  src/                            runtime CTAMP utama
+  requirements.txt                dependency Python
+  .env.example                    template konfigurasi
+```
+
+File runtime yang dihasilkan lokal seperti `logs/`, `__pycache__/`,
+`.pytest_cache/`, `.venv/`, `venv/`, dan `MUJOCO_LOG.TXT` tidak perlu disimpan
+ke repository.
+
+## Requirement
+
+Disarankan memakai:
+
+- Ubuntu 22.04/24.04, WSL2 Ubuntu, atau Linux native.
+- Python 3.10 sampai 3.12.
+- `python3-venv`, `pip`, dan build tools.
+- MuJoCo Python package.
+- OMPL Python binding.
+- Pinocchio package `pin` dan `robot_descriptions`.
+- OpenAI API key hanya jika menjalankan planner LLM di `src/main.py`.
+
+## Instalasi Di WSL
+
+Jalankan dari Ubuntu WSL, bukan dari PowerShell Python Windows.
 
 ```bash
-python scripts/analyze_run_logs.py
+cd /mnt/c/Adpro/MVP-CTAMP-ROBOT
+
+sudo apt update
+sudo apt install -y python3 python3-venv python3-pip build-essential \
+  libgl1 libglfw3 libglew-dev patchelf
+
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip setuptools wheel
+pip install -r requirements.txt
 ```
 
-Output analisis:
-
-```text
-docs/log_analysis/analysis_summary.md
-docs/log_analysis/failure_hotspots.png
-docs/log_analysis/ompl_outcomes_by_run.png
-docs/log_analysis/pipeline_funnel.png
-docs/log_analysis/pick_attempts_by_object.png
-docs/log_analysis/metrics.json
-```
-
-## Dataset Log
-
-Log yang dianalisis:
-
-```text
-align_cubes_ungroup_obs_20260514_060004_events.csv
-separate_groups_ungroup_obs_20260514_055533_events.csv
-separate_groups_ungroup_obs_20260514_060627_events.csv
-separate_groups_ungroup_obs_20260514_060855_events.csv
-separate_groups_ungroup_obs_20260514_061115_events.csv
-```
-
-Aggregate metrics:
-
-| Metric | Value |
-|---|---:|
-| Total events | 2111 |
-| OMPL starts | 132 |
-| OMPL OK | 126 |
-| OMPL failed | 4 |
-| OMPL error | 0 |
-| Trajectory starts | 126 |
-| Trajectory OK | 74 |
-| Trajectory failed | 51 |
-| IK warnings | 108 |
-| Collision blocked | 51 |
-| Table-left_finger blocked at waypoint 0 | 51 |
-| Pick failed events | 57 |
-| Place OK events | 8 |
-
-Summary run:
-
-| Task | Scene | Success | Objects moved | Objects total | Failed |
-|---|---|---:|---:|---:|---:|
-| align_cubes | ungroup_obs | False | 2 | 4 | 2 |
-| separate_groups | ungroup_obs | False | 3 | 8 | 5 |
-| separate_groups | ungroup_obs | False | 2 | 8 | 6 |
-
-## Visualisasi Data
-
-Failure hotspot:
-
-![Failure hotspots](docs/log_analysis/failure_hotspots.png)
-
-OMPL outcome per run:
-
-![OMPL outcomes](docs/log_analysis/ompl_outcomes_by_run.png)
-
-Pipeline funnel:
-
-![Pipeline funnel](docs/log_analysis/pipeline_funnel.png)
-
-Pick attempts per object:
-
-![Pick attempts](docs/log_analysis/pick_attempts_by_object.png)
-
-## Insight
-
-1. OMPL mayoritas berhasil menemukan path.
-
-   Dari 132 `OMPL_PLAN START`, ada 126 `OMPL_PLAN OK`. Hanya 4 event yang benar-benar `OMPL_PLAN FAILED`. Jadi bottleneck utama bukan planner tidak menemukan solusi.
-
-2. Banyak path gagal setelah masuk executor.
-
-   Ada 126 `TRAJECTORY_EXEC START`, tetapi hanya 74 `TRAJECTORY_EXEC OK` dan 51 `TRAJECTORY_EXEC FAILED`. Ini menunjukkan path yang sudah ditemukan OMPL sering ditolak saat validasi live trajectory.
-
-3. Failure paling dominan adalah table-finger collision di waypoint pertama.
-
-   Semua 51 `COLLISION_CHECK BLOCKED` adalah:
-
-   ```text
-   robot-env contact: table/1 <-> left_finger/82
-   phase=trajectory waypoint 0
-   ```
-
-   Ini berarti robot belum sempat bergerak. Path langsung diblok di start waypoint.
-
-4. Retry grip memperlihatkan masalah start-state, bukan hanya masalah gripping.
-
-   Setelah retry/drop, gripper sering berada dekat meja. Saat retry berikutnya dimulai, waypoint 0 masih mengandung kontak `left_finger` dengan table. Executor memblokir sebelum arm bergerak.
-
-5. IK masih sering tidak presisi.
-
-   Ada 108 `IK_SOLVE WARN`. Beberapa object, terutama `circle*` dan object jauh, memiliki `pos_err` besar. Artinya OMPL bisa planning ke joint goal, tetapi end-effector belum tentu tepat di pose grasp yang diinginkan.
-
-## Penyebab Failed
-
-Penyebab utama:
-
-```text
-live trajectory checker memblokir waypoint 0 karena table <-> left_finger contact
-```
-
-Detail teknis:
-
-1. OMPL planner menganggap start state valid karena itu state robot saat ini.
-2. Executor tetap melakukan collision check pada waypoint 0.
-3. Jika gripper sedang menyentuh/melewati meja sedikit setelah `drop()` atau retry, waypoint 0 langsung gagal.
-4. Karena gagal di waypoint 0, robot terlihat stuck walaupun `OMPL_PLAN OK`.
-
-Penyebab sekunder:
-
-```text
-IK target kurang presisi dan retry grasp belum mengubah strategi geometri secara cukup
-```
-
-Retry saat ini mengubah grip, grasp height, dan clearance. Namun belum mengubah approach direction, XY offset, side grasp, atau sampling grasp candidate.
-
-Penyebab yang bukan dominan:
-
-```text
-obstacle dekat
-```
-
-Obstacle tetap penting untuk safety, tetapi dari log terbaru failure terbanyak bukan obstacle collision. Failure terbanyak adalah table-finger collision di start waypoint.
-
-## Improvements Berikutnya
-
-Prioritas 1: perbaiki validasi waypoint 0.
-
-Rekomendasi:
-
-```text
-Jika waypoint_index == 0 dan q sama dengan current_q, jangan block karena table-finger contact kecil.
-Tetap block obstacle/vase/glass collision.
-Mulai strict validation dari waypoint 1.
-```
-
-Efek yang diharapkan:
-
-```text
-OMPL_PLAN OK benar-benar dilanjutkan ke gerakan robot.
-Trajectory failed karena table-finger waypoint 0 turun signifikan.
-```
-
-Prioritas 2: recovery pose setelah drop.
-
-Rekomendasi:
-
-```text
-Setelah drop(), buka gripper lalu move arm ke safe hover atau GRASP_READY.
-Jangan retry pick dari pose jari dekat meja.
-```
-
-Efek yang diharapkan:
-
-```text
-Retry pick tidak dimulai dari state collision.
-PICK failed karena move_pregrasp_failed berkurang.
-```
-
-Prioritas 3: validasi IK sebelum OMPL.
-
-Rekomendasi:
-
-```text
-Jika IK pos_err > 0.03 m untuk pregrasp/grasp, jangan langsung panggil OMPL.
-Coba null-space seed tambahan, XY pregrasp offset, atau target pose alternatif.
-```
-
-Efek yang diharapkan:
-
-```text
-OMPL tidak membuang waktu planning ke goal yang secara task-space buruk.
-Object lebih sering benar-benar ter-grip.
-```
-
-Prioritas 4: grasp sampler nyata.
-
-Rekomendasi:
-
-```text
-Cube: top grasp + offset kecil dari 4 sisi.
-Circle/cylinder: top grasp + radial side grasp.
-Retry: ubah pose grasp, bukan hanya grip width.
-```
-
-Efek yang diharapkan:
-
-```text
-PICK failed object_not_lifted berkurang.
-Circle lebih mudah diangkat.
-```
-
-Prioritas 5: improve OMPL secara langsung.
-
-Rekomendasi:
-
-```text
-Gunakan goal region, bukan satu goal joint hasil IK.
-Tambahkan clearance objective terhadap obstacle dan table.
-Tambahkan multiple seeds per phase.
-Gunakan path shortcut/smoothing yang tetap collision-aware.
-```
-
-Efek yang diharapkan:
-
-```text
-No-solution OMPL berkurang.
-Path lebih jauh dari obstacle dan table.
-```
-
-Prioritas 6: opsi arsitektur two-arm untuk task padat.
-
-Jika scene makin crowded, one-arm pick-place akan sering melewati area sempit dan sulit menjaga stabilitas object. Two-arm dapat dipertimbangkan untuk:
-
-```text
-satu arm melakukan stabilisasi / guarding
-satu arm melakukan pick-place
-atau satu arm memindahkan obstacle non-fragile/staging object jika task diperluas
-```
-
-Untuk constraint saat ini, obstacle fragile tetap tidak boleh disentuh.
-
-## Cara Reproduce Analisis
-
-1. Jalankan task:
+Jika OMPL dari `pip install ompl` tidak tersedia untuk versi Python yang
+dipakai, install OMPL binding dari package manager atau build dari source,
+lalu pastikan import ini berhasil:
 
 ```bash
-python scripts/separate_groups_ompl_only.py --object ungroup obs
+python -c "from ompl import base, geometric; print('ompl ok')"
+```
+
+Verifikasi dependency utama:
+
+```bash
+python -c "import mujoco; print('mujoco ok')"
+python -c "import pinocchio; print('pinocchio ok')"
+python -c "from robot_descriptions.loaders.pinocchio import load_robot_description; print('robot descriptions ok')"
+```
+
+Untuk viewer GUI dari WSL, pastikan WSLg aktif. Jika ingin menjalankan headless,
+gunakan `--no-viewer` pada script task atau set `ENABLE_VIEWER=false`.
+
+## Instalasi Di Linux Native
+
+```bash
+git clone <repo-url>
+cd MVP-CTAMP-ROBOT
+
+sudo apt update
+sudo apt install -y python3 python3-venv python3-pip build-essential \
+  libgl1 libglfw3 libglew-dev patchelf
+
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip setuptools wheel
+pip install -r requirements.txt
+```
+
+Buat file konfigurasi lokal:
+
+```bash
+cp .env.example .env
+```
+
+Isi `OPENAI_API_KEY` di `.env` hanya jika menjalankan mode LLM:
+
+```text
+OPENAI_API_KEY=your_openai_api_key_here
+MODEL_FILE=models/panda.xml
+ENABLE_VIEWER=true
+OMPL_ENABLED=true
+```
+
+## Cara Menjalankan
+
+Aktifkan virtualenv terlebih dahulu:
+
+```bash
+source .venv/bin/activate
+```
+
+### Jalankan Task OMPL-only
+
+Mode ini paling cocok untuk eksperimen karena tidak memerlukan API key.
+
+```bash
+python scripts/tidy_up_ompl_only.py --object group no obs
 python scripts/align_cubes_ompl_only.py --object ungroup obs
+python scripts/separate_groups_ompl_only.py --object ungroup obs
+python scripts/separate_groups_two_arm_ompl_only.py --object ungroup obs
 ```
 
-2. Generate analisis:
+Mode tanpa viewer:
 
 ```bash
-python scripts/analyze_run_logs.py
+python scripts/align_cubes_ompl_only.py --object ungroup obs --no-viewer
 ```
 
-3. Buka gambar di:
+Pilihan scene untuk `--object`:
 
 ```text
+group no obs
+ungroup no obs
+group obs
+ungroup obs
+```
+
+### Jalankan Planner LLM
+
+Pastikan `.env` sudah berisi `OPENAI_API_KEY`.
+
+```bash
+python src/main.py
+python src/main.py "tidy up all cubes into safe aligned slots"
+python src/main.py "move all cubes to the right side without touching obstacles"
+```
+
+### Analisis Log
+
+Setiap run dapat menghasilkan CSV di `logs/`. Untuk membuat summary dan grafik:
+
+```bash
+python scripts/analyze_run_logs.py --log-dir logs --out-dir docs/log_analysis
+```
+
+Untuk visualisasi HTML dari satu event CSV:
+
+```bash
+python scripts/visualize_task_log.py \
+  --events logs/<nama_file_events.csv> \
+  --task align_cubes \
+  --out docs/run_visualization.html
+```
+
+## Improvement Yang Sudah Dilakukan
+
+Versi MVP ini sudah memuat beberapa improvement penting:
+
+- OMPL planner diintegrasikan ke executor robot untuk trajectory joint-space.
+- Collision policy MuJoCo dipakai saat planning dan live execution.
+- Obstacle fragile diberi perlakuan khusus supaya tidak disentuh.
+- Pinocchio Levenberg-Marquardt IK dipakai untuk akurasi inverse kinematics
+  yang lebih baik dari legacy DLS.
+- Precheck task menandai object yang unreachable, terlalu dekat obstacle, atau
+  tidak aman untuk dipindahkan.
+- Recovery pose setelah `drop()` mengembalikan arm ke safe hover agar retry
+  tidak dimulai dari posisi jari dekat meja.
+- Live trajectory checker dibuat lebih toleran terhadap transient start contact
+  tertentu, sambil tetap memblok collision berbahaya.
+- Event trace CSV dibuat lebih lengkap untuk `OMPL_PLAN`, `TRAJECTORY_EXEC`,
+  `COLLISION_CHECK`, `PICK`, `PLACE`, dan `RECOVERY`.
+- Script analisis log dan comparison report ditambahkan untuk membaca bottleneck
+  secara kuantitatif.
+- Script task dipisah menjadi runner deterministic: tidy up, align cubes,
+  separate groups single-arm, dan separate groups two-arm.
+
+## Ringkasan Analisis MVP
+
+Analisis dari run sebelumnya menunjukkan:
+
+- OMPL sering berhasil menemukan path, sehingga bottleneck utama bukan selalu
+  "planner tidak menemukan solusi".
+- Banyak kegagalan muncul saat trajectory sudah masuk executor dan divalidasi
+  ulang oleh MuJoCo contact checker.
+- Failure dominan sebelumnya adalah contact `table` dengan `left_finger` pada
+  waypoint awal setelah drop atau retry.
+- Kualitas IK dan kualitas grasp masih menjadi pembatas saat object jauh,
+  object berbentuk circle/cylinder, atau scene padat obstacle.
+- Improvement recovery pose, start-contact handling, dan precheck menurunkan
+  failure yang sia-sia, tetapi task success masih perlu ditingkatkan melalui
+  grasp sampler dan place strategy yang lebih stabil.
+
+Dokumen analisis yang sudah ada:
+
+```text
+docs/log_analysis_comparison/comparison_summary.md
+```
+
+## Rencana Improvement Berikutnya
+
+Prioritas teknis berikutnya:
+
+1. Tambahkan grasp sampler nyata untuk cube dan circle/cylinder.
+2. Validasi IK pose grasp sebelum OMPL dipanggil.
+3. Gunakan beberapa IK seed dan beberapa candidate goal untuk setiap object.
+4. Tambahkan goal region planning, bukan hanya satu joint goal.
+5. Perkuat place strategy dengan release height, retreat path, dan settle check.
+6. Tambahkan test kecil untuk parser scene, target allocation, dan log analysis.
+7. Rapikan konfigurasi benchmark supaya hasil before/after mudah direproduksi.
+
+## Troubleshooting
+
+Jika viewer gagal muncul di WSL:
+
+```bash
+python scripts/align_cubes_ompl_only.py --object ungroup obs --no-viewer
+```
+
+Jika OMPL tidak ditemukan:
+
+```bash
+python -c "from ompl import base, geometric"
+```
+
+Jika command tersebut gagal, install ulang OMPL binding untuk Python yang sedang
+aktif di virtualenv.
+
+Jika Pinocchio gagal:
+
+```bash
+pip install pin robot_descriptions
+python -c "import pinocchio; print('pinocchio ok')"
+```
+
+Jika package tidak terbaca, pastikan virtualenv aktif:
+
+```bash
+which python
+python -m pip list
+```
+
+## Catatan Kebersihan Repository
+
+File berikut dianggap artefak lokal dan tidak perlu commit:
+
+```text
+.venv/
+venv/
+__pycache__/
+.pytest_cache/
+logs/
+MUJOCO_LOG.TXT
 docs/log_analysis/
+*.pyc
+*.log
+*.tmp
 ```
 
-4. Baca ringkasan otomatis:
-
-```text
-docs/log_analysis/analysis_summary.md
-```
+Gunakan `logs/` untuk hasil run lokal, lalu pindahkan hanya laporan atau grafik
+yang benar-benar ingin disimpan ke `docs/`.

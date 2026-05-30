@@ -1,4 +1,24 @@
 mujoco_env/
 .env
+
+# Python
 __pycache__/
 *.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local virtual environments
+.venv/
+venv/
+env/
+
+# Runtime logs and generated reports
+logs/
+MUJOCO_LOG.TXT
+docs/log_analysis/
+
+# Temporary files
+*.log
+*.tmp
+*.bak
